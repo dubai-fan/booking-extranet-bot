@@ -247,53 +247,49 @@ class BookingExtranetBot:
         except Exception as e:
             logger.error(f"Error closing browser: {e}")
 
-    async def navigate_to_calendar(self) -> bool:
-        """Navigate to the rates & availability calendar"""
+    async def navigate_to_calendar(self, hotel_id: str = None) -> bool:
+        """Navigate to the rates & availability calendar for a specific property"""
         if not self.rate_manager:
             logger.error("Rate manager not initialized")
             return False
-
-        return await self.rate_manager.navigate_to_calendar()
+        return await self.rate_manager.navigate_to_calendar(hotel_id=hotel_id)
 
     async def get_calendar_info(self) -> dict:
         """Get information about the current calendar page for debugging"""
         if not self.rate_manager:
-            logger.error("Rate manager not initialized")
             return {}
-
         return await self.rate_manager.get_current_page_info()
 
-# Example usage
+# ─── Main Entry Point ────────────────────────────────────────
+
+# Default hotel ID for Sultan Sunscape property
+DEFAULT_HOTEL_ID = '13616005'
+
 async def main():
-    """Example usage of the BookingExtranetBot"""
+    """Run the booking extranet bot to update rates from CSV"""
     bot = BookingExtranetBot()
 
     try:
-        # Initialize browser (set headless=False to see the automation)
         await bot.initialize_browser(headless=False)
 
-        # Login to extranet
         if await bot.login():
             logger.info("Login successful, ready for automation tasks!")
 
-            # Navigate to calendar
-            if await bot.navigate_to_calendar():
+            # Navigate to the property calendar
+            hotel_id = os.getenv('BOOKING_HOTEL_ID', DEFAULT_HOTEL_ID)
+            if await bot.navigate_to_calendar(hotel_id=hotel_id):
                 logger.info("Navigated to calendar successfully")
 
-                # Get current calendar info for debugging
-                calendar_info = await bot.get_calendar_info()
-                logger.info(f"Current calendar info: {calendar_info}")
-
-                # Process all rooms (example usage)
                 if bot.rate_manager:
                     success = await bot.rate_manager.process_all_rooms()
                     if success:
-                        logger.info("All rooms processed successfully")
+                        logger.info("All records processed successfully!")
                     else:
-                        logger.error("Failed to process rooms")
+                        logger.error("Some records failed to process")
                 else:
                     logger.error("Rate manager not available")
-
+            else:
+                logger.error("Failed to navigate to calendar")
         else:
             logger.error("Login failed!")
 
