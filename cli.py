@@ -212,6 +212,68 @@ async def cmd_read_message(args):
         await bot.close()
 
 
+# ─── send-message ──────────────────────────────────────────────
+
+async def cmd_send_message(args):
+    from messaging import MessagingManager
+
+    bot, logged_in = await _init_bot()
+    try:
+        if not logged_in:
+            output_json({'status': 'error', 'action': 'send-message', 'error': 'Login failed'})
+            return
+
+        messaging = MessagingManager(bot.page)
+        hotel_id = args.hotel_id or DEFAULT_HOTEL_ID
+
+        # Navigate to inbox first
+        await messaging._navigate_to_inbox(hotel_id)
+
+        result = await messaging.send_reply(
+            hotel_id=hotel_id,
+            message_index=args.index,
+            reply_text=args.message,
+        )
+
+        output_json({
+            'status': 'success' if result.get('sent') else 'error',
+            'action': 'send-message',
+            **result,
+        })
+
+    except Exception as e:
+        output_json({'status': 'error', 'action': 'send-message', 'error': str(e)})
+    finally:
+        await bot.close()
+
+
+# ─── list-properties ──────────────────────────────────────────
+
+async def cmd_list_properties(args):
+    from messaging import MessagingManager
+
+    bot, logged_in = await _init_bot()
+    try:
+        if not logged_in:
+            output_json({'status': 'error', 'action': 'list-properties', 'error': 'Login failed'})
+            return
+
+        messaging = MessagingManager(bot.page)
+        properties = await messaging.list_properties()
+
+        output_json({
+            'status': 'success',
+            'action': 'list-properties',
+            'count': len(properties),
+            'properties': properties,
+        })
+
+    except Exception as e:
+        output_json({'status': 'error', 'action': 'list-properties', 'error': str(e)})
+    finally:
+        await bot.close()
+
+
 # ─── CLI Parser ───────────────────────────────────────────────
 
 def main():
@@ -269,6 +331,21 @@ Examples:
     read_parser.add_argument('--filter', default='unanswered', choices=['unanswered', 'sent', 'all'],
                             help='Message filter to use when listing (default: unanswered)')
 
+    # ─── send-message ──────────────────────────────────────────
+    send_parser = subparsers.add_parser(
+        'send-message',
+        help='Send a reply to a guest conversation',
+    )
+    send_parser.add_argument('--index', type=int, required=True, help='Message index from list-messages (0-based)')
+    send_parser.add_argument('--message', required=True, help='Reply text to send')
+    send_parser.add_argument('--hotel-id', default=None, help='Hotel ID (default: from .env)')
+
+    # ─── list-properties ───────────────────────────────────────
+    subparsers.add_parser(
+        'list-properties',
+        help='List all properties with unread message counts',
+    )
+
     args = parser.parse_args()
 
     commands = {
@@ -276,6 +353,8 @@ Examples:
         'update-rates': cmd_update_rates,
         'list-messages': cmd_list_messages,
         'read-message': cmd_read_message,
+        'send-message': cmd_send_message,
+        'list-properties': cmd_list_properties,
     }
     asyncio.run(commands[args.command](args))
 

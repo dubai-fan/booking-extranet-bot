@@ -1,236 +1,165 @@
-# Booking.com Extranet Automation Bot
+# Booking.com Extranet Bot
 
-A Python automation bot for Booking.com admin extranet with 2FA support using Pulse app.
+A CLI tool for automating Booking.com partner extranet operations — downloading reservations, managing rates, and handling guest messages.
 
-## Features
+Forked from [acekavi/booking-extranet-bot](https://github.com/acekavi/booking-extranet-bot) with the goal of building a reliable, agent-friendly tool that can be used by AI orchestrators like [OpenClaw](https://github.com/openclaw), [Nanobot](https://github.com/nanobot-ai), and similar agent frameworks. Every command outputs structured JSON to stdout, making it easy for any agent or script to parse and act on the results.
 
-- **Automated Login**: Secure login with username/password and 2FA
-- **Manual 2FA Support**: Prompts you to enter 2FA codes from your Pulse app
-- **Optional Auto-2FA**: Can auto-generate codes if you provide TOTP secret
-- **Extranet Navigation**: Navigate between different sections (reservations, rates, availability, etc.)
-- **Data Extraction**: Get reservations, reviews, and other property data
-- **Task Automation**: Configurable automation tasks and scheduled operations
-- **Comprehensive Logging**: Detailed logging for debugging and monitoring
+## What changed from the original
+
+- **Real Chrome instead of Playwright's Chromium** — the original used Playwright's bundled browser, which triggers Booking.com's CAPTCHA/bot detection. We connect to your actual Chrome via CDP.
+- **Updated login flow** — Booking.com changed their 2FA to a verification method selection page (SMS, Pulse app, Phone call). The original bot's selectors were broken.
+- **CLI with JSON output** — replaced the script-based approach with a proper CLI that agents can call via subprocess.
+- **Reservation scraping** — Booking.com's download button is unreliable via CDP, so we scrape the table directly and build the Excel file ourselves. Output matches Booking.com's native export format.
+- **Multi-property support** — works with group accounts managing multiple properties.
 
 ## Prerequisites
 
-- Python 3.8 or higher
-- Booking.com Partner/Property account with admin access
-- Pulse app installed on your mobile device for 2FA
-- Chrome/Chromium browser (automatically handled by Playwright)
+- Python 3.8+
+- Google Chrome installed (not Chromium, not Brave — the real Chrome)
+- Booking.com partner account with admin access
 
 ## Installation
 
-1. **Clone or download the project files**
-
-2. **Install Python dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Install Playwright browsers**:
-   ```bash
-   playwright install chromium
-   ```
-
-4. **Set up environment variables**:
-   ```bash
-   cp .env.example .env
-   ```
-
-   Edit `.env` file with your credentials:
-   ```
-   BOOKING_USERNAME=your_booking_username
-   BOOKING_PASSWORD=your_booking_password
-   # PULSE_TOTP_SECRET=your_base32_secret  # Optional for auto-2FA
-   ```
-
-## 2FA Authentication Options
-
-### Option 1: Manual 2FA (Recommended)
-The bot will prompt you to enter the 2FA code from your Pulse app when needed:
-- No additional setup required
-- Most secure approach
-- You remain in control of 2FA codes
-
-### Option 2: Automatic 2FA (Optional)
-Set up TOTP secret for automatic code generation:
-
-1. **Generate TOTP secret**:
-   ```bash
-   pip install qrcode[pil]  # Install QR code dependencies
-   python setup_2fa.py
-   ```
-
-2. **Configure Pulse app**:
-   - Open Pulse app on your mobile device
-   - Add new TOTP entry
-   - Scan the QR code or manually enter the secret
-   - Set account name as "Booking.com Extranet"
-
-3. **Update .env file**:
-   - Copy the generated secret to `PULSE_TOTP_SECRET` in your `.env` file
-
-## Usage
-
-### Basic Usage
-
-```python
-import asyncio
-from booking_extranet_bot import BookingExtranetBot
-
-async def main():
-    bot = BookingExtranetBot()
-
-    try:
-        # Initialize browser
-        await bot.initialize_browser(headless=False)
-
-        # Login with 2FA (you'll be prompted for 2FA code)
-        if await bot.login():
-            print("Login successful!")
-
-            # Get reservations
-            reservations = await bot.get_reservations()
-            for reservation in reservations:
-                print(f"Reservation: {reservation}")
-
-            # Navigate to different sections
-            await bot.navigate_to_section('rates')
-            await bot.navigate_to_section('reviews')
-
-    finally:
-        await bot.close()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-### Manual 2FA Workflow
-
-When you run the bot, you'll see:
-```
-🔐 2FA Required!
-Please open your Pulse app and get the current 2FA code.
-Enter the 6-digit 2FA code from Pulse app: ######
-```
-
-Simply enter the 6-digit code from your Pulse app and the bot will continue automatically.
-
-    finally:
-        await bot.close()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-### Running Automation Tasks
-
 ```bash
-# Run daily checklist
-python automation_tasks.py
+git clone https://github.com/matsei-ruka/booking-extranet-bot.git
+cd booking-extranet-bot
 
-# Or import and use specific tasks
+python3 -m venv venv
+source venv/bin/activate   # Linux/macOS
+pip install -r requirements.txt
 ```
 
-### Available Methods
-
-- `initialize_browser(headless=False)`: Start browser session
-- `login()`: Login with credentials and 2FA
-- `navigate_to_section(section)`: Navigate to extranet sections
-- `get_reservations(days_ahead=7)`: Get upcoming reservations
-- `update_availability(room_type, date, rooms)`: Update room availability
-- `close()`: Clean up browser resources
-
-### Supported Sections
-
-- `properties`: Property management
-- `reservations`: Reservation management
-- `rates`: Rate and pricing management
-- `availability`: Room availability calendar
-- `reviews`: Guest reviews
-- `finance`: Financial reports
+No need to run `playwright install` — we use your real Chrome, not Playwright's browser.
 
 ## Configuration
 
-### Environment Variables
+Copy the example and fill in your credentials:
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `BOOKING_USERNAME` | Booking.com username | Yes |
-| `BOOKING_PASSWORD` | Booking.com password | Yes |
-| `PULSE_TOTP_SECRET` | Base32 TOTP secret from Pulse | Yes |
-| `HTTP_PROXY` | HTTP proxy (if needed) | No |
-| `HTTPS_PROXY` | HTTPS proxy (if needed) | No |
+```bash
+cp .env.example .env
+```
 
-### Browser Options
+```env
+BOOKING_USERNAME=your_login_name
+BOOKING_PASSWORD=your_password
+BOOKING_HOTEL_ID=your_default_hotel_id   # optional
+```
 
-You can customize browser behavior by modifying the `initialize_browser()` method:
+## CLI Usage
 
-- `headless=True`: Run browser in background
-- Custom user agents
-- Proxy settings
-- Window size and viewport
+All commands output JSON to stdout. Logs go to stderr and `booking_bot.log`.
 
-## Security Notes
+### List properties
 
-- Never commit your `.env` file to version control
-- Use environment variables for all sensitive data
-- The TOTP secret should be kept secure and not shared
-- Consider using encrypted storage for production deployments
+```bash
+python cli.py list-properties
+```
+
+```json
+{
+  "status": "success",
+  "action": "list-properties",
+  "count": 3,
+  "properties": [
+    {"hotel_id": "10353912", "name": "Property A", "unread_messages": 4},
+    {"hotel_id": "10353978", "name": "Property B", "unread_messages": 2},
+    {"hotel_id": "13616005", "name": "Property C", "unread_messages": 0}
+  ]
+}
+```
+
+### Download reservations
+
+```bash
+# As Excel file (Booking.com-compatible format)
+python cli.py download-reservations --start 2026-03-01 --end 2026-09-30
+
+# As JSON to stdout
+python cli.py download-reservations --start 2026-03-01 --end 2026-09-30 --json
+
+# Filter by booking date instead of arrival
+python cli.py download-reservations --start 2026-01-01 --end 2026-03-31 --date-type booking
+
+# Custom output directory
+python cli.py download-reservations --start 2026-03-01 --end 2026-09-30 --output-dir /path/to/folder
+```
+
+### List messages
+
+```bash
+# Unanswered messages (default)
+python cli.py list-messages --hotel-id 13616005
+
+# All messages
+python cli.py list-messages --hotel-id 13616005 --filter all
+```
+
+### Read a conversation
+
+```bash
+python cli.py read-message --hotel-id 13616005 --index 0
+```
+
+### Send a reply
+
+```bash
+python cli.py send-message --hotel-id 13616005 --index 0 --message "Thank you for your message!"
+```
+
+### Update rates
+
+```bash
+python cli.py update-rates
+python cli.py update-rates --hotel-id 13616005
+```
+
+## How it works
+
+1. **First run**: Chrome launches with a persistent profile (`.chrome-data/`). You log in once, including 2FA via SMS.
+2. **Subsequent runs**: the session is reused from `.chrome-data/`, no login or 2FA needed.
+3. **Commands**: each CLI call connects to Chrome via CDP (port 9222), performs the action, outputs JSON, and disconnects.
+
+If the session expires, the bot detects it and goes through the login flow again, prompting for the SMS code in the terminal.
+
+## For AI agents
+
+The CLI is designed to be called by AI agents as a subprocess:
+
+```python
+import subprocess, json
+
+result = subprocess.run(
+    ["python", "cli.py", "list-messages", "--hotel-id", "13616005"],
+    capture_output=True, text=True
+)
+data = json.loads(result.stdout)
+```
+
+Every command returns a JSON object with at least `status` ("success" or "error") and `action` (the command name). Errors include an `error` field with details.
+
+## Project structure
+
+```
+cli.py                     # CLI entry point
+booking_extranet_bot.py    # Bot core: Chrome launch, login, session
+reservations.py            # Reservation scraping and Excel export
+messaging.py               # Inbox, conversations, replies
+rate_manager.py            # Rate/pricing calendar updates
+.env                       # Credentials (not committed)
+.chrome-data/              # Persistent Chrome profile (not committed)
+downloads/                 # Downloaded reservation files
+```
 
 ## Troubleshooting
 
-### Common Issues
+**CAPTCHA on login**: This happens when logging in too many times in quick succession. Wait a few minutes and try again. Using real Chrome (not Playwright's Chromium) prevents this in normal use.
 
-1. **Login fails**:
-   - Check username/password
-   - Verify 2FA secret is correct
-   - Ensure Pulse app time is synchronized
+**Chrome won't connect**: Make sure no other Chrome instance is using port 9222. The bot will launch Chrome automatically if it's not running.
 
-2. **Browser crashes**:
-   - Try running with `headless=False` to see what's happening
-   - Check Chrome/Chromium installation
-   - Verify sufficient system resources
+**Session expired**: Just run any command — the bot will detect the expired session and prompt for login + SMS code.
 
-3. **2FA code invalid**:
-   - Ensure device time is synchronized
-   - Regenerate TOTP secret if needed
-   - Check secret is correctly copied to .env
+**Linux: Playwright doesn't support my Ubuntu version**: That's fine. We don't use Playwright's browser. Just install Chrome (`google-chrome-stable`) and run the bot directly.
 
-4. **Navigation issues**:
-   - Booking.com may update their interface
-   - Check browser console for errors
-   - Update selectors if needed
+## License
 
-### Logging
-
-All operations are logged to both console and `booking_bot.log` file. Check the logs for detailed error information.
-
-## Extending the Bot
-
-You can extend the bot by:
-
-1. **Adding new automation tasks** in `automation_tasks.py`
-2. **Creating new navigation methods** for additional extranet sections
-3. **Adding data extraction methods** for specific information
-4. **Implementing scheduling** with cron jobs or task schedulers
-
-## Legal and Compliance
-
-- Ensure compliance with Booking.com's Terms of Service
-- Use automation responsibly and within rate limits
-- This tool is for legitimate property management purposes only
-- Always respect website terms of use and robots.txt
-
-## Support
-
-For issues or questions:
-1. Check the troubleshooting section above
-2. Review log files for error details
-3. Ensure all dependencies are properly installed
-4. Verify environment configuration
-
-## Version History
-
-- **v1.0.0**: Initial release with basic automation and 2FA support
+MIT

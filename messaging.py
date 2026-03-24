@@ -160,6 +160,18 @@ class MessagingManager:
             logger.error(f"Error listing messages: {e}")
             return {'hotel_id': hotel_id, 'filter': filter_type, 'unanswered_count': 0, 'messages': []}
 
+    async def _get_visible_conversation_buttons(self) -> list:
+        """Get visible conversation buttons from the inbox list"""
+        msg_buttons = await self.page.query_selector_all(
+            'button[data-test-id="inbox-conversation-item"]'
+        )
+        visible = []
+        for btn in msg_buttons:
+            box = await btn.bounding_box()
+            if box and box['width'] > 200 and box['height'] > 40:
+                visible.append(btn)
+        return visible
+
     async def read_conversation(
         self,
         hotel_id: str,
@@ -176,13 +188,7 @@ class MessagingManager:
             Dict with guest_name, reservation_info, and conversation messages
         """
         try:
-            # Click on the message
-            msg_buttons = await self.page.query_selector_all('button.dadb648d92')
-            visible_buttons = []
-            for btn in msg_buttons:
-                box = await btn.bounding_box()
-                if box and box['width'] > 200 and box['height'] > 40:
-                    visible_buttons.append(btn)
+            visible_buttons = await self._get_visible_conversation_buttons()
 
             if message_index >= len(visible_buttons):
                 logger.error(f"Message index {message_index} out of range ({len(visible_buttons)} messages)")
@@ -191,7 +197,7 @@ class MessagingManager:
             await visible_buttons[message_index].click()
             await asyncio.sleep(3)
 
-            # Read the conversation from the right panel
+            # Read the conversation from the middle panel
             conversation = {
                 'index': message_index,
                 'messages': [],
@@ -203,8 +209,153 @@ class MessagingManager:
                 text = await msg_list.inner_text()
                 conversation['full_text'] = text[:5000]
 
+            # Get reservation details from the right panel
+            detail = await self.page.evaluate("""() => {
+                const body = document.body.innerText;
+                const result = {};
+                const labels = ['Guest name:', 'Booking reference number:', 'Arrival:',
+                               'Departure:', 'Total price:', 'Preferred language:',
+                               'Total guests:'];
+                for (const label of labels) {
+                    const idx = body.indexOf(label);
+                    if (idx !== -1) {
+                        const after = body.substring(idx + label.length, idx + label.length + 100);
+                        const val = after.split('\\n')[0].trim() || after.split('\\n')[1]?.trim();
+                        if (val) result[label.replace(':', '')] = val;
+                    }
+                }
+                return result;
+            }""")
+            conversation['reservation'] = detail
+
             return conversation
 
         except Exception as e:
             logger.error(f"Error reading conversation: {e}")
             return None
+
+    async def send_reply(
+        self,
+        hotel_id: str,
+        message_index: int,
+        reply_text: str,
+    ) -> Dict:
+        """
+        Send a reply to a conversation.
+
+        Args:
+            hotel_id: Property hotel ID
+            message_index: Index of the message in the inbox list (0-based)
+            reply_text: The reply message to send
+
+        Returns:
+            Dict with status and details
+        """
+        try:
+            # Make sure we're on the inbox page
+            if 'messaging' not in self.page.url or f'hotel_id={hotel_id}' not in self.page.url:
+                if not await self._navigate_to_inbox(hotel_id):
+                    return {'sent': False, 'error': 'Failed to navigate to inbox'}
+
+            # Click the conversation
+            visible_buttons = await self._get_visible_conversation_buttons()
+            if message_index >= len(visible_buttons):
+                return {'sent': False, 'error': f'Message index {message_index} out of range ({len(visible_buttons)} messages)'}
+
+            # Get guest name before clicking
+            name_el = await visible_buttons[message_index].query_selector('.list-item__title-text')
+            guest_name = (await name_el.inner_text()).strip() if name_el else 'Unknown'
+
+            await visible_buttons[message_index].click()
+            logger.info(f"Opened conversation with {guest_name}")
+            await asyncio.sleep(3)
+
+            # Find the reply textarea
+            textarea = await self.page.query_selector('textarea.chat-form__textarea')
+            if not textarea:
+                return {'sent': False, 'error': 'Reply textarea not found'}
+
+            # Check if the thread is closed
+            body_text = await self.page.inner_text('body')
+            if 'thread is closed' in body_text.lower():
+                return {'sent': False, 'error': 'Message thread is closed, cannot reply'}
+
+            # Type the reply
+            await textarea.click()
+            await asyncio.sleep(1)
+            await textarea.fill(reply_text)
+            logger.info(f"Typed reply: {reply_text[:50]}...")
+            await asyncio.sleep(1)
+
+            # Click Send
+            send_btn = self.page.locator('button:has-text("Send")')
+            await send_btn.click(timeout=5000)
+            logger.info("Clicked Send button")
+            await asyncio.sleep(3)
+
+            # Verify by checking if the message appeared or filter changed
+            return {
+                'sent': True,
+                'guest_name': guest_name,
+                'reply': reply_text,
+                'hotel_id': hotel_id,
+            }
+
+        except Exception as e:
+            logger.error(f"Error sending reply: {e}")
+            return {'sent': False, 'error': str(e)}
+
+    async def list_properties(self) -> List[Dict]:
+        """
+        Get all properties from the group homepage with unread message counts.
+
+        Returns:
+            List of dicts with hotel_id, name, unread_messages
+        """
+        try:
+            # Navigate to group homepage
+            ses = self._get_session()
+            url = f"https://admin.booking.com/hotel/hoteladmin/groups/home/index.html?ses={ses}&lang=en"
+            await self.page.goto(url, wait_until='networkidle')
+            await asyncio.sleep(3)
+
+            # Extract properties and their messaging badge counts
+            data = await self.page.evaluate("""() => {
+                const links = Array.from(document.querySelectorAll('a'));
+                const properties = {};
+                const msgCounts = {};
+
+                for (const a of links) {
+                    const match = a.href.match(/hotel_id=(\\d+)/);
+                    if (!match) continue;
+                    const hid = match[1];
+
+                    // Property name links (longer text, not just numbers)
+                    const text = a.innerText.trim();
+                    if (text.length > 5 && !/^\\d+$/.test(text) && !properties[hid]) {
+                        properties[hid] = text;
+                    }
+
+                    // Messaging links have the unread count as their text
+                    if (a.href.includes('messaging') && /^\\d+$/.test(text)) {
+                        msgCounts[hid] = parseInt(text);
+                    }
+                }
+
+                return {properties, msgCounts};
+            }""")
+
+            result = []
+            for hid, name in data['properties'].items():
+                result.append({
+                    'hotel_id': hid,
+                    'name': name,
+                    'unread_messages': data['msgCounts'].get(hid, 0),
+                })
+
+            logger.info(f"Found {len(result)} properties")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error listing properties: {e}")
+            return []
