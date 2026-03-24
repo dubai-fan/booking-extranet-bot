@@ -76,3 +76,7 @@ playwright/.cache/
 # Screenshots and videos (if generated)
 screenshots/
 videos/
+
+.chrome-data/
+debug_*.py
+debug_*.png

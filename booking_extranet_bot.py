@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import time
 import logging
 from typing import Optional
@@ -44,50 +45,58 @@ class BookingExtranetBot:
             raise ValueError("Missing required environment variables (BOOKING_USERNAME, BOOKING_PASSWORD). Please check .env file.")
 
     async def initialize_browser(self, headless: bool = False) -> None:
-        """Initialize browser and create new context"""
+        """Initialize browser using real Chrome to avoid bot detection"""
         try:
-            playwright = await async_playwright().start()
+            self.playwright = await async_playwright().start()
 
-            # Launch browser with specific options for Booking.com
-            self.browser = await playwright.chromium.launch(
-                headless=headless,
-                args=[
-                    '--no-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-web-security',
-                    '--disable-features=VizDisplayCompositor'
-                ]
+            # Use real Chrome via remote debugging to avoid CAPTCHA/bot detection
+            import platform
+            system = platform.system()
+            if system == 'Darwin':
+                chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            elif system == 'Linux':
+                # Try common Linux Chrome/Chromium paths
+                for path in ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium-browser', '/usr/bin/chromium']:
+                    if os.path.exists(path):
+                        chrome_path = path
+                        break
+                else:
+                    raise FileNotFoundError("Chrome/Chromium not found. Install with: sudo apt install google-chrome-stable")
+            else:
+                chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
+            chrome_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.chrome-data')
+
+            # Launch real Chrome with remote debugging
+            self.chrome_process = subprocess.Popen(
+                [
+                    chrome_path,
+                    '--remote-debugging-port=9222',
+                    f'--user-data-dir={chrome_data_dir}',
+                    '--no-first-run',
+                    '--no-default-browser-check',
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
+            await asyncio.sleep(3)  # Wait for Chrome to start
 
-            # Create browser context with realistic user agent
-            self.context = await self.browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                viewport={'width': 1920, 'height': 1080},
-                locale='en-US',
-                timezone_id='UTC'
-            )
-
-            # Create new page
+            # Connect Playwright to the real Chrome instance
+            self.browser = await self.playwright.chromium.connect_over_cdp('http://localhost:9222')
+            self.context = self.browser.contexts[0]
             self.page = await self.context.new_page()
 
             # Initialize rate manager with the page
             self.rate_manager = RateManager(self.page)
 
-            # Set extra HTTP headers
-            await self.page.set_extra_http_headers({
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-            })
-
-            logger.info("Browser initialized successfully")
+            logger.info("Browser initialized successfully (real Chrome)")
 
         except Exception as e:
             logger.error(f"Failed to initialize browser: {e}")
             raise
 
     async def login(self) -> bool:
-        """Login to Booking.com extranet with 2FA"""
+        """Login to Booking.com extranet with 2FA support"""
         try:
             if not self.page:
                 raise Exception("Browser not initialized")
@@ -100,79 +109,125 @@ class BookingExtranetBot:
             # Navigate to Booking.com admin login page
             await self.page.goto('https://admin.booking.com/hotel/hoteladmin/', wait_until='networkidle')
 
+            # Check if already logged in (session cookie still valid)
+            if 'admin.booking.com' in self.page.url and 'sign-in' not in self.page.url and 'account.booking.com' not in self.page.url:
+                logger.info("Already logged in (session still valid)!")
+                return True
+
             # Wait for and fill username
-            await self.page.wait_for_selector('input[name="loginname"]', timeout=5000)
+            await self.page.wait_for_selector('input[name="loginname"]', timeout=10000)
             await self.page.fill('input[name="loginname"]', self.username)
             logger.info("Username entered")
 
-            # Click Next button after entering username
-            await self.page.click('button[type="submit"] span:text("Next")', timeout=5000)
-            await asyncio.sleep(1)  # Brief pause for page transition
+            # Click Next/Submit button
+            await self.page.click('button[type="submit"]', timeout=5000)
+            await asyncio.sleep(3)
 
-            # Fill password
+            # Wait for password field to appear
+            await self.page.wait_for_selector('input[name="password"]', state='visible', timeout=15000)
             await self.page.fill('input[name="password"]', self.password)
             logger.info("Password entered")
 
             # Click login button
             await self.page.click('button[type="submit"]', timeout=5000)
+            await asyncio.sleep(5)
 
-            # Wait for 2FA prompt or dashboard
-            # Wait for 2FA prompt and handle Pulse app verification
-            await asyncio.sleep(2)  # Wait for page transition
+            # Check if we landed on the dashboard (no 2FA needed)
+            current_url = self.page.url
+            if 'admin.booking.com' in current_url and 'sign-in' not in current_url and 'account.booking.com' not in current_url:
+                logger.info("Login successful (no 2FA required)!")
+                return True
 
-            # Check if we need to click Pulse app button first
+            # 2FA verification method selection page
+            logger.info("2FA verification required, checking options...")
+
+            # Try clicking SMS option
             try:
-                pulse_button = await self.page.wait_for_selector('a.nw-pulse-verification-link', timeout=10000)
-                if pulse_button:
-                    await pulse_button.click()
-                    logger.info("Clicked Pulse app verification button")
-                    await asyncio.sleep(3)  # Wait longer for page transition
-            except Exception as e:
-                logger.info("Pulse app button not found or already clicked")
+                sms_link = self.page.locator('a:has-text("Text message (SMS)")')
+                await sms_link.click(timeout=10000)
+                logger.info("Selected SMS verification")
+                await asyncio.sleep(5)
+            except Exception:
+                logger.info("SMS link not found, checking for other verification methods...")
 
-            # Wait for 2FA code input field to appear
+            # Look for phone number selection (if multiple phones)
             try:
-                await self.page.wait_for_selector('input[name="sms_code"]', timeout=15000)
-                logger.info("2FA code input field found")
+                phone_button = self.page.locator('button:has-text("Send")').first
+                await phone_button.click(timeout=5000)
+                logger.info("Clicked Send SMS button")
+                await asyncio.sleep(5)
+            except Exception:
+                pass
 
-                # Manual input from terminal
-                two_fa_code = input("Enter the 6-digit 2FA code from your Pulse app: ").strip()
-                logger.info("2FA code entered manually")
-
-                # Enter the 2FA code
-                await self.page.fill('input[name="sms_code"]', two_fa_code)
-                logger.info("2FA code entered")
-
-                # Submit the 2FA code (look for submit button or form)
+            # Wait for code input - try multiple possible selectors
+            code_input = None
+            for selector in [
+                'input[name="sms_code"]',
+                'input[name="code"]',
+                'input[name="verification_code"]',
+                'input[type="tel"]',
+                'input[type="number"]',
+                'input[inputmode="numeric"]',
+                'input[autocomplete="one-time-code"]',
+            ]:
                 try:
-                    await self.page.click('button[type="submit"]', timeout=5000)
-                    logger.info("2FA code submitted")
+                    await self.page.wait_for_selector(selector, state='visible', timeout=3000)
+                    code_input = selector
+                    logger.info(f"Found 2FA code input: {selector}")
+                    break
                 except Exception:
-                    # Alternative: try pressing Enter
-                    await self.page.press('input[name="sms_code"]', 'Enter')
-                    logger.info("2FA code submitted via Enter key")
+                    continue
 
-                await asyncio.sleep(3)  # Wait longer for verification
+            if not code_input:
+                # Last resort: find any visible text input on the page
+                inputs = await self.page.query_selector_all('input')
+                for inp in inputs:
+                    visible = await inp.is_visible()
+                    inp_type = await inp.get_attribute('type')
+                    if visible and inp_type in ('text', 'tel', 'number', None):
+                        code_input = inp
+                        logger.info("Found 2FA input via fallback scan")
+                        break
 
-            except Exception as e:
-                logger.error(f"2FA code input failed: {e}")
+            if not code_input:
+                logger.error("Could not find 2FA code input field")
+                await self.page.screenshot(path='debug_2fa_not_found.png', full_page=True)
                 return False
 
-            # Wait for successful login (dashboard or main page)
+            # Ask for code from terminal
+            two_fa_code = input("\nEnter the verification code (SMS/Pulse): ").strip()
+
+            # Enter the code
+            if isinstance(code_input, str):
+                await self.page.fill(code_input, two_fa_code)
+            else:
+                await code_input.fill(two_fa_code)
+            logger.info("2FA code entered")
+
+            # Submit
+            try:
+                await self.page.click('button[type="submit"]', timeout=5000)
+                logger.info("2FA code submitted")
+            except Exception:
+                await self.page.keyboard.press('Enter')
+                logger.info("2FA code submitted via Enter key")
+
+            await asyncio.sleep(5)
+
+            # Check for successful login
+            current_url = self.page.url
+            if 'admin.booking.com' in current_url and 'sign-in' not in current_url and 'account.booking.com' not in current_url:
+                logger.info("Login successful!")
+                return True
+
+            # One more wait in case of redirect
             try:
                 await self.page.wait_for_url('**/hoteladmin/**', timeout=15000)
                 logger.info("Login successful!")
                 return True
-
             except Exception:
-                # Alternative check for successful login
-                current_url = self.page.url
-                if 'admin.booking.com' in current_url and 'login' not in current_url:
-                    logger.info("Login successful!")
-                    return True
-                else:
-                    logger.error("Login failed - still on login page")
-                    return False
+                logger.error(f"Login failed - current URL: {self.page.url}")
+                return False
 
         except Exception as e:
             logger.error(f"Login failed: {e}")
@@ -183,10 +238,10 @@ class BookingExtranetBot:
         try:
             if self.page:
                 await self.page.close()
-            if self.context:
-                await self.context.close()
             if self.browser:
                 await self.browser.close()
+            if hasattr(self, 'chrome_process') and self.chrome_process:
+                self.chrome_process.terminate()
             self.rate_manager = None
             logger.info("Browser closed successfully")
         except Exception as e:
