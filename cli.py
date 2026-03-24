@@ -7,8 +7,9 @@ Designed for use by AI agents — outputs structured JSON to stdout.
 
 Usage:
     python cli.py download-reservations --start 2026-03-01 --end 2026-03-31
+    python cli.py download-reservations --start 2026-03-01 --end 2026-03-31 --json
+    python cli.py list-messages --hotel-id 13616005
     python cli.py update-rates
-    python cli.py update-rates --hotel-id 13616005
 """
 
 import argparse
@@ -34,70 +35,83 @@ logging.basicConfig(
 )
 logger = logging.getLogger('cli')
 
+DEFAULT_HOTEL_ID = os.getenv('BOOKING_HOTEL_ID', '13616005')
+
 
 def output_json(data: dict):
     """Print JSON result to stdout for AI agent consumption"""
     print(json.dumps(data, indent=2, default=str))
 
 
-async def cmd_download_reservations(args):
-    """Download reservations as Excel file"""
+async def _init_bot():
+    """Initialize and login the bot. Returns (bot, success)."""
     from booking_extranet_bot import BookingExtranetBot
+    bot = BookingExtranetBot()
+    await bot.initialize_browser(headless=False)
+    success = await bot.login()
+    return bot, success
+
+
+# ─── download-reservations ────────────────────────────────────
+
+async def cmd_download_reservations(args):
     from reservations import ReservationsManager
 
-    bot = BookingExtranetBot()
+    bot, logged_in = await _init_bot()
     try:
-        await bot.initialize_browser(headless=False)
-
-        if not await bot.login():
+        if not logged_in:
             output_json({'status': 'error', 'action': 'download-reservations', 'error': 'Login failed'})
             return
 
         reservations = ReservationsManager(bot.page)
 
-        file_path = await reservations.download_reservations(
-            start_date=args.start,
-            end_date=args.end,
-            date_type=args.date_type,
-            output_dir=args.output_dir,
-        )
-
-        if file_path:
+        if args.json:
+            # Return data as JSON instead of Excel
+            data = await reservations.get_reservations_data(
+                start_date=args.start,
+                end_date=args.end,
+                date_type=args.date_type,
+            )
             output_json({
                 'status': 'success',
                 'action': 'download-reservations',
-                'file': file_path,
-                'params': {
-                    'start': args.start,
-                    'end': args.end,
-                    'date_type': args.date_type,
-                },
+                'params': {'start': args.start, 'end': args.end, 'date_type': args.date_type},
+                'count': len(data),
+                'reservations': data,
             })
         else:
-            output_json({
-                'status': 'error',
-                'action': 'download-reservations',
-                'error': 'Download failed or timed out',
-            })
+            file_path = await reservations.download_reservations(
+                start_date=args.start,
+                end_date=args.end,
+                date_type=args.date_type,
+                output_dir=args.output_dir,
+            )
+            if file_path:
+                output_json({
+                    'status': 'success',
+                    'action': 'download-reservations',
+                    'file': file_path,
+                    'params': {'start': args.start, 'end': args.end, 'date_type': args.date_type},
+                })
+            else:
+                output_json({'status': 'error', 'action': 'download-reservations', 'error': 'Failed'})
+
     except Exception as e:
         output_json({'status': 'error', 'action': 'download-reservations', 'error': str(e)})
     finally:
         await bot.close()
 
 
+# ─── update-rates ─────────────────────────────────────────────
+
 async def cmd_update_rates(args):
-    """Update rates from CSV file"""
-    from booking_extranet_bot import BookingExtranetBot, DEFAULT_HOTEL_ID
-
-    bot = BookingExtranetBot()
+    bot, logged_in = await _init_bot()
     try:
-        await bot.initialize_browser(headless=False)
-
-        if not await bot.login():
+        if not logged_in:
             output_json({'status': 'error', 'action': 'update-rates', 'error': 'Login failed'})
             return
 
-        hotel_id = args.hotel_id or os.getenv('BOOKING_HOTEL_ID', DEFAULT_HOTEL_ID)
+        hotel_id = args.hotel_id or DEFAULT_HOTEL_ID
 
         if not await bot.navigate_to_calendar(hotel_id=hotel_id):
             output_json({'status': 'error', 'action': 'update-rates', 'error': 'Failed to navigate to calendar'})
@@ -107,12 +121,18 @@ async def cmd_update_rates(args):
             success = await bot.rate_manager.process_all_rooms()
             progress = bot.rate_manager.get_progress_summary()
 
-            output_json({
+            result = {
                 'status': 'success' if success else 'partial',
                 'action': 'update-rates',
                 'hotel_id': hotel_id,
                 'progress': progress,
-            })
+            }
+
+            if args.json:
+                # Include the CSV data in the response
+                result['records'] = bot.rate_manager.csv_data
+
+            output_json(result)
         else:
             output_json({'status': 'error', 'action': 'update-rates', 'error': 'Rate manager not available'})
 
@@ -122,6 +142,78 @@ async def cmd_update_rates(args):
         await bot.close()
 
 
+# ─── list-messages ────────────────────────────────────────────
+
+async def cmd_list_messages(args):
+    from messaging import MessagingManager
+
+    bot, logged_in = await _init_bot()
+    try:
+        if not logged_in:
+            output_json({'status': 'error', 'action': 'list-messages', 'error': 'Login failed'})
+            return
+
+        messaging = MessagingManager(bot.page)
+        hotel_id = args.hotel_id or DEFAULT_HOTEL_ID
+
+        result = await messaging.list_messages(
+            hotel_id=hotel_id,
+            filter_type=args.filter,
+        )
+
+        output_json({
+            'status': 'success',
+            'action': 'list-messages',
+            **result,
+        })
+
+    except Exception as e:
+        output_json({'status': 'error', 'action': 'list-messages', 'error': str(e)})
+    finally:
+        await bot.close()
+
+
+# ─── read-message ─────────────────────────────────────────────
+
+async def cmd_read_message(args):
+    from messaging import MessagingManager
+
+    bot, logged_in = await _init_bot()
+    try:
+        if not logged_in:
+            output_json({'status': 'error', 'action': 'read-message', 'error': 'Login failed'})
+            return
+
+        messaging = MessagingManager(bot.page)
+        hotel_id = args.hotel_id or DEFAULT_HOTEL_ID
+
+        # First list messages to navigate to inbox
+        await messaging.list_messages(hotel_id=hotel_id, filter_type=args.filter)
+
+        # Then read the specific conversation
+        conversation = await messaging.read_conversation(
+            hotel_id=hotel_id,
+            message_index=args.index,
+        )
+
+        if conversation:
+            output_json({
+                'status': 'success',
+                'action': 'read-message',
+                'hotel_id': hotel_id,
+                **conversation,
+            })
+        else:
+            output_json({'status': 'error', 'action': 'read-message', 'error': 'Message not found'})
+
+    except Exception as e:
+        output_json({'status': 'error', 'action': 'read-message', 'error': str(e)})
+    finally:
+        await bot.close()
+
+
+# ─── CLI Parser ───────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(
         description='Booking.com Extranet CLI — automation tool for AI agents',
@@ -129,9 +221,12 @@ def main():
         epilog="""
 Examples:
   python cli.py download-reservations --start 2026-03-01 --end 2026-03-31
-  python cli.py download-reservations --start 2026-01-01 --end 2026-12-31 --date-type booking
+  python cli.py download-reservations --start 2026-03-01 --end 2026-09-30 --json
   python cli.py update-rates
-  python cli.py update-rates --hotel-id 13616005
+  python cli.py update-rates --hotel-id 13616005 --json
+  python cli.py list-messages
+  python cli.py list-messages --hotel-id 13616005 --filter all
+  python cli.py read-message --index 0
         """,
     )
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -139,42 +234,50 @@ Examples:
     # ─── download-reservations ────────────────────────────────
     dl_parser = subparsers.add_parser(
         'download-reservations',
-        help='Download reservations as Excel file',
+        help='Download reservations as Excel file (or JSON with --json)',
     )
-    dl_parser.add_argument(
-        '--start', required=True,
-        help='Start date (YYYY-MM-DD)',
-    )
-    dl_parser.add_argument(
-        '--end', required=True,
-        help='End date (YYYY-MM-DD)',
-    )
-    dl_parser.add_argument(
-        '--date-type', default='arrival',
-        choices=['arrival', 'departure', 'booking'],
-        help='Date filter type (default: arrival)',
-    )
-    dl_parser.add_argument(
-        '--output-dir', default=None,
-        help='Directory to save the file (default: ./downloads/)',
-    )
+    dl_parser.add_argument('--start', required=True, help='Start date (YYYY-MM-DD)')
+    dl_parser.add_argument('--end', required=True, help='End date (YYYY-MM-DD)')
+    dl_parser.add_argument('--date-type', default='arrival', choices=['arrival', 'departure', 'booking'])
+    dl_parser.add_argument('--output-dir', default=None, help='Directory to save Excel (default: ./downloads/)')
+    dl_parser.add_argument('--json', action='store_true', help='Return reservation data as JSON instead of Excel')
 
     # ─── update-rates ─────────────────────────────────────────
     rates_parser = subparsers.add_parser(
         'update-rates',
         help='Update room rates from CSV file',
     )
-    rates_parser.add_argument(
-        '--hotel-id', default=None,
-        help='Hotel ID to update (default: from .env or 13616005)',
+    rates_parser.add_argument('--hotel-id', default=None, help='Hotel ID (default: from .env)')
+    rates_parser.add_argument('--json', action='store_true', help='Include full record data in JSON output')
+
+    # ─── list-messages ────────────────────────────────────────
+    msg_parser = subparsers.add_parser(
+        'list-messages',
+        help='List guest messages from inbox',
     )
+    msg_parser.add_argument('--hotel-id', default=None, help='Hotel ID (default: from .env)')
+    msg_parser.add_argument('--filter', default='unanswered', choices=['unanswered', 'sent', 'all'],
+                            help='Message filter (default: unanswered)')
+
+    # ─── read-message ─────────────────────────────────────────
+    read_parser = subparsers.add_parser(
+        'read-message',
+        help='Read a specific conversation',
+    )
+    read_parser.add_argument('--index', type=int, default=0, help='Message index from list-messages (default: 0)')
+    read_parser.add_argument('--hotel-id', default=None, help='Hotel ID (default: from .env)')
+    read_parser.add_argument('--filter', default='unanswered', choices=['unanswered', 'sent', 'all'],
+                            help='Message filter to use when listing (default: unanswered)')
 
     args = parser.parse_args()
 
-    if args.command == 'download-reservations':
-        asyncio.run(cmd_download_reservations(args))
-    elif args.command == 'update-rates':
-        asyncio.run(cmd_update_rates(args))
+    commands = {
+        'download-reservations': cmd_download_reservations,
+        'update-rates': cmd_update_rates,
+        'list-messages': cmd_list_messages,
+        'read-message': cmd_read_message,
+    }
+    asyncio.run(commands[args.command](args))
 
 
 if __name__ == '__main__':

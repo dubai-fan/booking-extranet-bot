@@ -79,6 +79,79 @@ class ReservationsManager:
             pass
         return 0
 
+    async def _scrape_all_pages(self, start_date: str, end_date: str, date_type: str) -> List[List[str]]:
+        """Navigate to reservations page and scrape all pages. Returns raw row data."""
+        ses = self._get_session()
+        if not ses:
+            logger.error("No session token found")
+            return []
+
+        type_map = {'arrival': 'ARRIVAL', 'departure': 'DEPARTURE', 'booking': 'BOOKING'}
+        url_date_type = type_map.get(date_type, 'ARRIVAL')
+        url = (
+            f"https://admin.booking.com/hotel/hoteladmin/groups/reservations/index.html"
+            f"?lang=xu&ses={ses}"
+            f"&dateFrom={start_date}&dateTo={end_date}&dateType={url_date_type}"
+        )
+        logger.info(f"Navigating to reservations: {start_date} to {end_date} ({date_type})...")
+        await self.page.goto(url, wait_until='networkidle')
+
+        row_count = await self._wait_for_table()
+        if row_count == 0:
+            logger.warning("No reservations found for this date range")
+            return []
+
+        total = await self._get_total_count()
+        logger.info(f"Found {total} reservations ({row_count} on first page)")
+
+        all_data = await self._scrape_current_page()
+        logger.info(f"Scraped page 1: {len(all_data)} rows")
+
+        page_num = 1
+        while len(all_data) < total:
+            page_num += 1
+            try:
+                next_btn = self.page.locator('button[aria-label="Next page"]')
+                if not await next_btn.is_visible():
+                    break
+                await next_btn.click()
+                await self._wait_for_table()
+                page_data = await self._scrape_current_page()
+                if not page_data:
+                    break
+                all_data.extend(page_data)
+                logger.info(f"Scraped page {page_num}: {len(page_data)} rows (total: {len(all_data)})")
+            except Exception as e:
+                logger.warning(f"Error scraping page {page_num}: {e}")
+                break
+
+        return all_data
+
+    async def get_reservations_data(
+        self,
+        start_date: str,
+        end_date: str,
+        date_type: str = 'arrival',
+    ) -> List[Dict]:
+        """
+        Scrape reservations and return as list of dicts (for JSON output).
+        """
+        try:
+            all_data = await self._scrape_all_pages(start_date, end_date, date_type)
+            columns = SCRAPE_COLUMNS
+            result = []
+            for row in all_data:
+                record = {}
+                for i, col in enumerate(OUTPUT_COLUMNS):
+                    if col in columns:
+                        idx = columns.index(col)
+                        record[col] = row[idx] if idx < len(row) else ''
+                result.append(record)
+            return result
+        except Exception as e:
+            logger.error(f"Error getting reservations data: {e}")
+            return []
+
     async def download_reservations(
         self,
         start_date: str,
@@ -89,12 +162,6 @@ class ReservationsManager:
         """
         Scrape reservations and build an Excel file.
 
-        Args:
-            start_date: Start date in YYYY-MM-DD format
-            end_date: End date in YYYY-MM-DD format
-            date_type: Filter type - 'arrival', 'departure', or 'booking'
-            output_dir: Directory to save the file (default: ./downloads/)
-
         Returns:
             Path to the generated Excel file, or None on failure
         """
@@ -102,59 +169,10 @@ class ReservationsManager:
             save_dir = output_dir or self.downloads_dir
             os.makedirs(save_dir, exist_ok=True)
 
-            ses = self._get_session()
-            if not ses:
-                logger.error("No session token found")
-                return None
+            all_data = await self._scrape_all_pages(start_date, end_date, date_type)
 
-            # Navigate with date params directly in URL
-            type_map = {'arrival': 'ARRIVAL', 'departure': 'DEPARTURE', 'booking': 'BOOKING'}
-            url_date_type = type_map.get(date_type, 'ARRIVAL')
-            url = (
-                f"https://admin.booking.com/hotel/hoteladmin/groups/reservations/index.html"
-                f"?lang=xu&ses={ses}"
-                f"&dateFrom={start_date}&dateTo={end_date}&dateType={url_date_type}"
-            )
-            logger.info(f"Navigating to reservations: {start_date} to {end_date} ({date_type})...")
-            await self.page.goto(url, wait_until='networkidle')
-
-            # Wait for data to load
-            row_count = await self._wait_for_table()
-            if row_count == 0:
-                logger.warning("No reservations found for this date range")
-                # Still create an empty file
-                all_data = []
-            else:
-                total = await self._get_total_count()
-                logger.info(f"Found {total} reservations ({row_count} on first page)")
-
-                # Scrape first page
-                all_data = await self._scrape_current_page()
-                logger.info(f"Scraped page 1: {len(all_data)} rows")
-
-                # Scrape remaining pages
-                page_num = 1
-                while len(all_data) < total:
-                    page_num += 1
-                    try:
-                        next_btn = self.page.locator('button[aria-label="Next page"]')
-                        if not await next_btn.is_visible():
-                            break
-                        await next_btn.click()
-                        await self._wait_for_table()
-                        page_data = await self._scrape_current_page()
-                        if not page_data:
-                            break
-                        all_data.extend(page_data)
-                        logger.info(f"Scraped page {page_num}: {len(page_data)} rows (total: {len(all_data)})")
-                    except Exception as e:
-                        logger.warning(f"Error scraping page {page_num}: {e}")
-                        break
-
-            # Build Excel file with Booking.com-compatible column names and order
             import pandas as pd
             df = pd.DataFrame(all_data, columns=SCRAPE_COLUMNS[:len(all_data[0])] if all_data else SCRAPE_COLUMNS)
-            # Reorder to match Booking.com's export format
             df = df[[c for c in OUTPUT_COLUMNS if c in df.columns]]
 
             filename = f"Reservations_{start_date}_{end_date}.xlsx"
