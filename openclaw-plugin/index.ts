@@ -39,7 +39,7 @@ function errorResult(err: any) {
 }
 
 export default definePluginEntry({
-  id: "booking-extranet",
+  id: "booking-extranet-bot",
   name: "Booking.com Extranet",
   description:
     "Manage Booking.com properties — reservations, messages, rates.",

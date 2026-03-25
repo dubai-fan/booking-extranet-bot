@@ -1,5 +1,5 @@
 {
-  "name": "@matsei-ruka/openclaw-booking-extranet",
+  "name": "@matsei-ruka/booking-extranet-bot",
   "version": "1.0.0",
   "description": "OpenClaw plugin for Booking.com extranet automation",
   "type": "module",

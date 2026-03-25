@@ -1,5 +1,5 @@
 {
-  "id": "booking-extranet",
+  "id": "booking-extranet-bot",
   "name": "Booking.com Extranet",
   "description": "Manage Booking.com properties — download reservations, list/reply to guest messages, update rates.",
   "version": "1.0.0",
