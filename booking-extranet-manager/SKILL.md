@@ -1,7 +1,7 @@
 ---
 name: Booking.com Extranet Manager
 description: Manage Booking.com properties — download reservations, list/reply to guest messages, update rates. Wraps a Python CLI that automates the Booking.com extranet via real Chrome.
-version: 1.0.0
+version: 1.1.0
 tags:
   - booking
   - hospitality
@@ -10,11 +10,40 @@ tags:
   - automation
 author: matsei-ruka
 source: https://github.com/matsei-ruka/booking-extranet-bot
+credentials:
+  - name: BOOKING_USERNAME
+    description: Booking.com partner extranet login name
+    required: true
+  - name: BOOKING_PASSWORD
+    description: Booking.com partner extranet password
+    required: true
+  - name: PULSE_TOTP_SECRET
+    description: Optional TOTP secret for automated 2FA (if not using SMS)
+    required: false
+env:
+  - name: BOT_DIR
+    description: Absolute path to the booking-extranet-bot directory
+    required: true
+  - name: BOOKING_HOTEL_ID
+    description: Default property hotel ID (optional, used when --hotel-id is omitted)
+    required: false
+scope:
+  - browser_automation: Uses Google Chrome via remote debugging (CDP on localhost:9222)
+  - local_storage: Persists browser session in .chrome-data/ directory to avoid repeated login/2FA
+  - network: Connects only to admin.booking.com and account.booking.com
+  - filesystem: Reads .env for credentials, writes Excel files to ./downloads/
 ---
 
 # Booking.com Extranet Manager
 
-Automate Booking.com property management through a CLI tool. This skill provides commands to download reservations, manage guest messages, and update room rates.
+Automate Booking.com property management through a Python CLI tool. Uses your locally installed Google Chrome (not a headless browser) to interact with the Booking.com partner extranet, avoiding bot detection.
+
+## Security Notes
+
+- **Credentials** are stored locally in a `.env` file in the bot directory — never transmitted elsewhere.
+- **Browser session** is persisted in `.chrome-data/` so login + SMS 2FA only happens once. Delete this directory to clear the session.
+- **Chrome remote debugging** runs on `localhost:9222` only — not exposed to the network.
+- The bot connects exclusively to `admin.booking.com` and `account.booking.com`.
 
 ## Prerequisites
 
@@ -26,14 +55,21 @@ cd booking-extranet-bot
 python3 -m venv venv
 source venv/bin/activate   # Linux/macOS
 pip install -r requirements.txt
-cp .env.example .env       # Then fill in BOOKING_USERNAME and BOOKING_PASSWORD
 ```
 
-Google Chrome must be installed. The bot launches Chrome with remote debugging automatically.
+Then create a `.env` file with your credentials:
+
+```
+BOOKING_USERNAME=your_login_name
+BOOKING_PASSWORD=your_password
+BOOKING_HOTEL_ID=your_default_hotel_id  # optional
+```
+
+Google Chrome must be installed on the host machine.
 
 ## Environment
 
-- `BOT_DIR`: Path to the booking-extranet-bot directory
+- `BOT_DIR`: Absolute path to the booking-extranet-bot directory
 - Python venv at `$BOT_DIR/venv/bin/python3`
 - CLI entry point: `$BOT_DIR/cli.py`
 
