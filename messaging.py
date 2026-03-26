@@ -38,7 +38,7 @@ class MessagingManager:
             # Wait for conversation list items to appear
             try:
                 await self.page.wait_for_selector(
-                    'div.messages-list-item',
+                    'button[data-test-id="inbox-conversation-item"]',
                     timeout=15000,
                 )
             except Exception:
@@ -69,29 +69,30 @@ class MessagingManager:
             if not await self._navigate_to_inbox(hotel_id):
                 return []
 
-            # Set the filter using the visible <select> (no data-test-id)
+            # Set the filter
             filter_map = {
-                'unanswered': 'pending_property',
-                'sent': 'pending_guest',
-                'all': '',
+                'unanswered': 'PENDING_PROPERTY',
+                'sent': 'PENDING_GUEST',
+                'all': 'ALL',
             }
-            filter_value = filter_map.get(filter_type, 'pending_property')
+            filter_value = filter_map.get(filter_type, 'PENDING_PROPERTY')
 
             try:
-                # Find the visible select element
-                selects = await self.page.query_selector_all('select')
-                for sel in selects:
-                    if await sel.is_visible():
-                        await sel.select_option(filter_value)
-                        logger.info(f"Filter set to: {filter_type} ({filter_value})")
-                        await asyncio.sleep(3)
-                        break
+                await self.page.select_option(
+                    'select[data-test-id="inbox-conversation-filter-select"]',
+                    filter_value,
+                    timeout=5000,
+                )
+                logger.info(f"Filter set to: {filter_type} ({filter_value})")
+                await asyncio.sleep(3)
             except Exception:
                 logger.warning("Could not set filter, using default")
 
-            # Scrape message list items using stable BEM class selectors
+            # Scrape conversation items
             messages = []
-            msg_items = await self.page.query_selector_all('div.messages-list-item')
+            msg_items = await self.page.query_selector_all(
+                'button[data-test-id="inbox-conversation-item"]'
+            )
 
             for i, item in enumerate(msg_items):
                 try:
@@ -99,28 +100,34 @@ class MessagingManager:
                     if not visible:
                         continue
 
-                    # Guest name
-                    name_el = await item.query_selector('.messages-list-item__guest-name')
+                    # Guest name (stable BEM class)
+                    name_el = await item.query_selector('.list-item__title-text')
                     guest_name = (await name_el.inner_text()).strip() if name_el else 'Unknown'
 
-                    # Date/timestamp
-                    date_el = await item.query_selector('.messages-list-item__timestamp')
-                    date = (await date_el.inner_text()).strip() if date_el else ''
+                    # Date — look for small text elements with date-like content
+                    date = ''
+                    spans = await item.query_selector_all('span')
+                    for span in spans:
+                        text = (await span.inner_text()).strip()
+                        if text and ('20' in text or 'Jan' in text or 'Feb' in text or
+                                     'Mar' in text or 'Apr' in text or 'May' in text or
+                                     'Jun' in text or 'Jul' in text or 'Aug' in text or
+                                     'Sep' in text or 'Oct' in text or 'Nov' in text or
+                                     'Dec' in text):
+                            date = text
+                            break
 
-                    # Preview text
-                    preview_el = await item.query_selector('.messages-list-item__content')
-                    preview = (await preview_el.inner_text()).strip() if preview_el else ''
-
-                    # Unread indicator
-                    unread_el = await item.query_selector('.messages-list-item__unread-indicator')
-                    has_unread = unread_el is not None
+                    # Preview — get all text, remove guest name and date
+                    full_text = (await item.inner_text()).strip()
+                    preview = full_text.replace(guest_name, '').replace(date, '').strip()
+                    # Clean up newlines
+                    preview = ' '.join(preview.split())
 
                     messages.append({
                         'index': len(messages),
                         'guest_name': guest_name,
                         'date': date,
                         'preview': preview[:200],
-                        'unread': has_unread,
                     })
 
                 except Exception as e:
@@ -142,7 +149,9 @@ class MessagingManager:
 
     async def _get_conversation_items(self) -> list:
         """Get visible conversation items from the inbox list"""
-        items = await self.page.query_selector_all('div.messages-list-item')
+        items = await self.page.query_selector_all(
+            'button[data-test-id="inbox-conversation-item"]'
+        )
         visible = []
         for item in items:
             if await item.is_visible():
@@ -240,7 +249,7 @@ class MessagingManager:
                 return {'sent': False, 'error': f'Message index {message_index} out of range ({len(visible_buttons)} messages)'}
 
             # Get guest name before clicking
-            name_el = await visible_buttons[message_index].query_selector('.messages-list-item__guest-name')
+            name_el = await visible_buttons[message_index].query_selector('.list-item__title-text')
             guest_name = (await name_el.inner_text()).strip() if name_el else 'Unknown'
 
             await visible_buttons[message_index].click()
